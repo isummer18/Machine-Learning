@@ -1,0 +1,319 @@
+---
+title: "Practical Machine Learning Course Project"
+author: Ilyssa Summer
+output: 
+  html_notebook:
+    theme: united
+    # toc: true
+    # toc_depth: 2
+---
+**Background**
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).
+
+<!-- There is a collection of data about personal athletic activity.  These devices are part of the quantified self movement, enthusiasts who take measurements about themeselves continuously, to improve their health, find patterns in their behavior, etc.  -->
+
+<!-- The quantity vs the quality of their activity will be evaluated.  -->
+
+
+**Data**
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+**What you should submit**
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+** Prediction algorithm steps**
+
+- 1. Clean data. Remove data with little/no data
+- 2. Create training and cross validation sets from training data.
+- 3. Try 3 training algorithms: Random Forest, Gradient Boosted Model and Linear Discriminatn Analysis.
+- 4. Fit a model that combines predictors. Test for errors on testing data. Predict the best on validation set
+
+
+```{r setup, include=FALSE}
+chooseCRANmirror(graphics=FALSE, ind=1)
+knitr::opts_chunk$set(echo = TRUE)
+message(sprintf("Run time: %s\nR version: %s", Sys.time(), R.Version()$version.string))
+```
+
+
+**Install packages and import libraries. 
+
+
+#Load required packages 
+
+```{r}
+install.packages("doParallel")
+install.packages("pglm")
+install.packages("gbm")
+install.packages("randomForest")
+install.packages("topicmodels")
+install.packages("doSNOW")
+require(MASS)
+library(randomForest) 
+library("gbm")
+require("topicmodels")
+require("lda")
+library(plyr)
+
+require(randomForest)
+require(mlbench)
+require(pglm)
+require(e1071)
+require(pROC)
+library(caret)
+library(ggplot2)
+library(doParallel)
+```
+
+# devtools::install_github("jabiru/tictoc")
+# library(tictoc)
+
+**Load Data**
+```{r}
+#Replace blank data with NA
+training<-read.csv("pml-training.csv",na.strings=c("NA","#DIV/0!",""))
+testing<- read.csv("pml-testing.csv",na.strings=c("NA","#DIV/0!",""))
+```
+
+**Check out data**
+```{r}
+head(training) ;summary(training)
+unique(training); View(training)
+```
+- The testing data is `r round(dim(testing)[1]/(dim(testing)[1]+dim(training)[1])*100,2)` % of the total data set. 
+- There are 160 initial variables (features) in this data set.
+- From the training set, we are trying to predict the each classe 
+`r print(summary(training$classe))`
+
+### Preprocessing data
+```{r}
+# Remove unneeded variables
+remove_vars<-training[,1:5];
+head(remove_vars)
+cat("Removing variables:",names(remove_vars))
+
+training_sub<-training[,6:dim(training)[2]]
+
+#Remove columns with NA
+colsPos<-colnames(training_sub)[!colSums(is.na(training_sub))>0]
+colsPosMat<-as.matrix(colsPos)
+head(colsPosMat); dim(colsPosMat)
+cat("Removed", dim(training_sub)[2]-dim(colsPosMat)[1], "additional variables and currently have", dim(colsPosMat)[1],".")
+
+training_sub2<-training[,colsPosMat]
+dim(training_sub2)
+
+nzCols<-nearZeroVar(training_sub2, saveMetrics = T)
+nzCols
+
+#Keep variables with nearZeroVar ==False (we want some variance). This will remove near-zero variance=True.
+training_sub3<-training_sub2[,nzCols$nzv==FALSE]
+cat("Removed", dim(training_sub2)[2]-dim(training_sub3)[2], "additional variable and currently have", dim(training_sub3)[2],". Feature", colnames(training_sub2)[1], "was removed.")
+
+#Make our outcome variable a factor variable. 
+training_sub3$classe<-as.factor(training_sub3$classe)
+training<-training_sub3
+```
+**Partition rows into training and crossvalidation**
+
+```{r}
+inTrain<-createDataPartition(training$classe, p=0.6)[[1]]
+head(inTrain)[1:5]
+crossval<-training[-inTrain,] # 40 %
+training<-training[inTrain,]  # 60 %
+
+dim(crossval)
+dim(training)
+
+##Test from crossvalidation
+# 75% of testing from cross validation set
+inTest<-createDataPartition(crossval$classe, p=0.75)[[1]]
+crossval_test<- crossval[-inTest,] #25% cross val tested
+crossval<-crossval[inTest,] # 75% cross val of testing set 
+dim(crossval)
+dim(crossval_test)
+```
+
+**Set up testing data**
+ 
+```{r}
+dim(testing)
+#We can remove the first 6, to match the training cols
+testing<-testing[,7:ncol(testing)]; head(testing)[1:6]
+testPos<-colnames(testing)[!colSums(is.na(testing)>0)]
+testing<-testing[,testPos]
+cat(dim(testing)[1], "testing rows with", dim(testing)[2], "variables")
+
+#The predictor needs to be a factor variable. Introduce testing$class=NA for prediction
+testing$classe<-NA
+```
+
+### Train different models
+
+Here we will use random forest, generalized boosted mode, and linear discriminat analysis
+- Fit 
+  * (1) a random forest predictor relating the factor variable y to the remaining variables.
+  * (2) a boosted predictor using the "gbm" method. 
+  * (3) a linear discriminant anlaysis
+(1) uses randomForest function and (2-3) use the caret package under function train due to run time of the trees in the forest. 
+
+```{r}
+mod_rf_sys.time<-
+system.time(
+  mod_rf<-randomForest(as.factor(classe) ~.,
+        data=training,
+        importance=TRUE,
+        prOximity=TRUE)
+  )
+
+#Train models with caret 
+##trainControl with method="cv" for cross validation
+mod_gbm_sys.time<-
+system.time(
+mod_gbm<-train(classe~., data=training, method="gbm",verbose=F, trControl=trainControl(method="cv", number=5, allowParallel=T))
+)
+
+mod_lda_sys.time<-
+system.time(
+  mod_lda<-train(classe~., data=training, method="lda")
+  )
+
+#Compare model run time.
+model_times<-data.frame(mod_rf_sys.time[1:5],mod_gbm_sys.time[1:5], mod_lda_sys.time[1:5])
+model_times<-data.frame(t(model_times))
+cat("The elapsed time (sec) per model: randomForest, generalized boosted model and linear discriminant analysis, is:", model_times$elapsed, "resp")
+```
+
+### Test the accuracies
+
+- Predict each model against the cross validation set, which is `r round(dim(crossval)[1]/(dim(testing)[1]+dim(training_dim)[1])/100,4)` % of total data
+
+- Set a confusion matrix individually
+
+```{r}
+pred_rf<-predict(mod_rf, crossval)
+pred_gbm<-predict(mod_gbm,crossval)
+pred_lda<-predict(mod_lda, crossval)
+```
+#### Gather exact accuracies from confusion matrix
+- Confusion matrix for each model prediction (3)
+- Confusion matrix for combined data frame of models
+
+```{r}
+confMat_rf<-confusionMatrix(pred_rf,crossval$classe)
+confMat_gbm<-confusionMatrix(pred_gbm,crossval$classe)
+confMat_lda<-confusionMatrix(pred_lda,crossval$classe)
+```
+
+```{r}
+cat("The accuracies from each model are: randomForest",
+round(confMat_rf$overall[1],4)*100,"%, generalized boosted model", round(confMat_gbm$overall[1],4)*100,"%, and linear discriminant analysis", round(confMat_lda$overall[1],4)*(100),"%")
+
+```
+We can now search if a combined model works better.
+
+### Combine models
+Fit a model that combines predictors 
+
+```{r}
+#predDF includes all models
+predDF<-data.frame(pred_rf,pred_gbm,pred_lda, classe=crossval$classe)
+```
+Since lda model had 70% accuracy, we could make a sub model with only rf and gbm, since they carried 99.7% and 98.7 % accuracies.
+
+```{r}
+predDF2<-data.frame(pred_rf,pred_gbm, classe=crossval$classe)
+```
+
+**Create combination models.**
+Try two model types: "gam" and "rf". These were chosen since the generalized additative model, "gam", provides a smoothing factor. RandomForest was chosen since it held the best accuracy of the models independently. 
+
+```{r}
+#train model with "gam" for smoothing factor
+combModFit_gam<-train(classe~., method="gam",data=predDF2)
+
+#predict combMod_gam
+combMod_Pred_gam<-predict(combModFit_gam, predDF2)
+
+#in-sample error
+confMat_predDF2_gbm<-confusionMatrix(combMod_Pred_gam,predDF2$classe)
+
+#train model with "rf"
+combModFit_rf<-train(classe~., method="rf",data=predDF2)
+#predict
+combMod_Pred_rf<-predict(combModFit_rf, predDF2)
+#in-sample error
+confMat_predDF2_rf<-confusionMatrix(combMod_Pred_rf,predDF2$classe)
+
+cat("The accuracy for the gam model is", round(confMat_predDF2_gbm$overall[1],4),"and the combination model predicting random forest and generalized boosting mode via randomForest prediction is", round(confMat_predDF2_rf$overall[1],4))
+```
+**Out of sample error**
+
+```{r}
+pred_rf_out_samp<-predict(mod_rf, crossval_test)
+
+accuracy_out<-sum(pred_rf_out_samp==crossval_test$classe)/ length(pred_rf_out_samp)
+accuracy_out
+
+accuracy<-sum(pred_rf==crossval$classe)/ length(pred_rf)
+accuracy
+
+```
+From the combination model, trained against random forest and generalized boosting model, is best validated using random forest, as compared to the generalized additive model, "gam".
+
+For the independent models, the RF model can be used as the main predictor, with accuracy `r round(accuracy*100,2)`%. The data was trained on function randomForest().
+
+The out of sample error was calculated. The model achieved `r round(accuracy_out*100,2)`%. This was using the method="rf" with the caret package, with function train().
+
+
+**Dominant Features**
+
+As we have assessed the model of choice will be randomForest, we can then use find the importance of each variable from trained data using rf model.
+
+```{r}
+importance(mod_rf)
+varImpPlot(mod_rf, sort = T, n.var = 10, main="Top 10 selected features")
+plot(xlab="MeanDecrease Accuracy/Gini Index", main="Top 10 selected features")
+```
+
+
+## Model on testing dataset
+
+Solution for the 20 cases from the testing dataset.
+
+```{r}
+# predict testing data
+pred_rf_testing<-predict(mod_rf, newdata=testing)
+pred_rf_testing
+```
+
+**Submit answers**
+Use coursera code
+
+```{r}
+pml_write_files=function(x){
+  n=length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+                      write.table(x[i], file=filename, quote=F, row.names = F, col.names = F)
+  }
+}
+x<-testing
+                    
+answers<-predict(mod_rf, newdata = x)
+answers
+```
+
+```{r}
+pml_write_files(answers)
+```
+
